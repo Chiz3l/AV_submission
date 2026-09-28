@@ -1,0 +1,103 @@
+### Part A - recover the data (CAN decode)
+
+Frame ID kept: 200 hex / 512 decimal
+the dbx had this line which indicated the decimal number to be 512
+BO_ 512 STEER_ActuatorLog: 8 Vector__XXX
+as such in the logs where it is all stored in hex values this would mean the can_id we were looking for is 200
+
+Signal 1 (u_commanded):  byte position / endianness / signed? / scale / offset: bit 0-16 / little (@1) / yes (the negative '-') / 0.1 / 0
+Signal 2 (y_measured):   byte position / endianness / signed? / scale / offset: bit 16-32 / little (@1) / yes (the negative '-') / 0.1 / 0
+(reference so i can just read off this)
+BO_ 512 STEER_ActuatorLog: 8 Vector__XXX
+ SG_ MeasuredAngle : 0|16@1- (0.1,0) [0|0] "deg" Vector__XXX
+ SG_ CmdAngularRate : 16|16@1- (0.1,0) [0|0] "deg/s" Vector__XXX
+ SG_ SupplyMilliVolts : 32|16@1+ (1,0) [0|0] "mV" Vector__XXX
+ SG_ ActuatorTemp : 48|16@1- (0.01,-40) [0|0] "degC" Vector__XXX
+
+Notes (anything odd in the logs, how you checked the decode against the PNGs):
+I ran the decode and then the python file to check the graphs against the sample graphs given to us, I simply did this visually at first
+but then to doubleee check any minute differences that i may have visually missed i thought the easiest way would be to run it against a png checker online
+i could have learnt how to coded one up in python buit considered it overkill for a simple check like this and outside some text allignment differences
+the graphs were identical (used this website to check https://www.diffchecker.com/image-compare/)
+
+
+### Part B - identify system
+first i looked into what a first order sysytem was and how to calculate lag and intertia and came across the standard equation to calculate the first order
+system of a motor that accounts for the intertial load of the system that slows it down and how the torque produced by magnetic forces resists the change
+this when simplifying to be a relationship between the values i have me
+
+(motor_lag)*(angular_accel) + angular_vel = (sys_gain)*(command_velocity)
+
+system gain - this is a measure of how close the system is to the command velocity and how sensitice it is
+    this is calculated by: sys_gain = (d(y_measured)/dt)/(u_commanded)
+
+    as such looking at the step test csv we can see that 
+    - at t = 1, y_measured = 15.7, u_commanded = 15  
+    - at t = 2, y_measured = 35.2, u_commanded = 15
+
+    as such (d(y_measured)/dt) = (35.2 - 15.7)/(2 - 1) = 19.5
+
+    as such sys_gain = 19.5/15 = 1.3
+
+motor_lag - this is a measure of the motors physical intertia and how quickly it can slow down when a command stops
+    this can be calculated by looking at the data and seeing how much the angle moves after a command to stop the motor has been sent
+
+    as such looking at the step test csv we can see that 
+    - at t = 3, y_measured = 54.7, u_commanded = 15
+    - at t = 3.005, y_measured = 54.8, u_commanded = 0 (when the command to spin stopped being sent)
+    - at t = 3.245, y_measured = 56.1, u_commanded = 0
+
+    as theta = (angular_vel)*t
+    t = theta/angular_vel
+    t = (56.1-54.7)/(19.5)
+    t = 0.07179487179 seconds
+
+now note that the initial angular velocity should be 0, as such rearange for angular_accel
+(angular_accel) = ((sys_gain)*(command_velocity) - (angular_vel))/(motor_lag)
+
+then to get the current angle multiply by dt^2
+(angular_accel) = (((sys_gain)*(command_velocity) - (prev_angular_vel))/(motor_lag)) * dt^2
+
+
+there was also a point of non-nonlinearity  which seems to be backlash rather than a deadzone the reasoning for this is
+the fact that when looking at the deadband test we can clearly see that there is no movement when oscillating the input velocity
+and then if we look at the reversal test we can see that during reversal despite the change in value of the command velocity
+there is a small flat point in the graph at the points of reversal
+if this were a deadzone then these flat points wouldnt exist or be smaller than the deadband test's amount
+as such 
+    - at t = 4.02, y_measured = 38.6, u_commanded = -8
+    - at t = 4.605, y_measured = 38.6, u_commanded = -8
+
+as such the gap is (the /2 is because it is backlash from the center point)
+backlash_theta = ((command_vel)*(sys_gain)*(dt))/2
+backlash_theta = ((8)*(1.3)*(4.605-(4.02+0.07)))/2 -- (4.02+0.07) the 0.07 is because of the motor lag
+backlash_theta = 2.678
+
+now calculating the backlash from the deadzone test
+as such 
+    - at t = 4, y_measured = 2.6, u_commanded = 2
+    - at t = 6, y_measured = 2.6, u_commanded = -2
+
+backlash_theta = ((command_vel)*(sys_gain)*(dt))/2
+backlash_theta = ((2)*(1.3)*(6-(4+0.07)))/2
+backlash_theta = 2.509
+
+as such it is very likely that there is a 2.5-2.6 degree backlash
+
+
+### Part C - control design choices
+previously when i made a pid controller i noticed that at first you just try out a bunch of relatively small numbers and you 
+keep tweaking them until you are able to get the right proportions with enough trial and error
+where you use kp for the main major push in terms of how large each step is
+and ki is for minimising error where you notice that error and success in the past and use it to tune the mobements
+and kd allows you to control the speed of how quickly this all happens and changes
+
+i also used all low pass moving average filter to make it so that the controller isnt thrown off by minor changes that seem large in comarison
+e.g a 0.1 deg change over 0.05 seconds even though over 2 seconds its maybe a 1 degree change in total but it seems mucch quicker due to 
+sensor sensitivity quirks as such a average deals with this 
+
+### Part D - reflection
+I learend quite a bit about how equations in simulations work and how control systems then utilse these equations
+along with this workign with calculating contants from data and workign with csv files and looking at the sensitivity of sensors
+and thinking about different real life things like sensor lag and inertia and for fun searching up second degree equatiosn that include things like accounting for electrical inductance and resistances 
+in the motor it was very interesting to implement and see and slightly challenging ot understand
